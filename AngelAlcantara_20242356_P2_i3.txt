@@ -1,0 +1,483 @@
+Link del video: [agregar enlace del video aqui]
+
+ISP
+=========================================================================
+enable
+configure terminal
+hostname ISP
+no ip domain-lookup
+banner motd #ISP - Infraestructura 3 - Matricula 2024-2356#
+ip routing
+
+interface Ethernet0/0
+ description Enlace hacia R-USER e0/0
+ ip address 20.24.23.1 255.255.255.252
+ no shutdown
+exit
+
+interface Ethernet0/1
+ description Enlace hacia FG-Server port1
+ ip address 20.24.56.1 255.255.255.252
+ no shutdown
+exit
+
+interface Loopback0
+ description Simula Internet
+ ip address 8.8.8.8 255.255.255.255
+exit
+
+line console 0
+ logging synchronous
+ exec-timeout 0 0
+exit
+
+end
+write memory
+
+! (Solo deben aparecer 20.24.23.0/30, 20.24.56.0/30 y 8.8.8.8/32.
+!  No hay rutas hacia 10.23.56.x: el servidor solo es accesible por la VIP
+!  (web) o por la VPN de acceso remoto (SSH)
+
+
+
+=========================================================================
+SW-USUARIOS.
+=========================================================================
+
+enable
+configure terminal
+hostname SW-Usuarios
+no ip domain-lookup
+banner motd #SW-Usuarios - Infraestructura 3 - Matricula 2024-2356#
+
+vlan 10
+ name USUARIOS
+exit
+
+interface Ethernet0/0
+ description Trunk hacia R-USER e0/1
+ switchport trunk encapsulation dot1q
+ switchport mode trunk
+ switchport trunk allowed vlan 10
+ no shutdown
+exit
+
+interface Ethernet0/1
+ description Access hacia PC-Usuario
+ switchport mode access
+ switchport access vlan 10
+ spanning-tree portfast
+ no shutdown
+exit
+
+interface range Ethernet0/2 - 3
+ description No usado
+ shutdown
+exit
+
+line console 0
+ logging synchronous
+ exec-timeout 0 0
+exit
+
+end
+write memory
+
+
+
+=========================================================================
+R-USER
+=========================================================================
+
+enable
+configure terminal
+hostname R-USER
+no ip domain-lookup
+banner motd #R-USER - Infraestructura 3 - Matricula 2024-2356#
+
+#DHCP VLAN 10
+ip dhcp excluded-address 10.23.56.1 10.23.56.9
+ip dhcp excluded-address 10.23.56.101 10.23.56.127
+ip dhcp pool VLAN10-USUARIOS
+ network 10.23.56.0 255.255.255.128
+ default-router 10.23.56.1
+ dns-server 8.8.8.8
+exit
+
+#Interfaces
+
+interface Ethernet0/0
+ description WAN hacia ISP
+ ip address 20.24.23.2 255.255.255.252
+ ip nat outside
+ ip tcp adjust-mss 1360
+ no shutdown
+exit
+
+interface Ethernet0/1
+ description Trunk hacia SW-Usuarios
+ no ip address
+ no shutdown
+exit
+
+interface Ethernet0/1.10
+ description VLAN 10 - Usuarios
+ encapsulation dot1Q 10
+ ip address 10.23.56.1 255.255.255.128
+ ip nat inside
+ ip tcp adjust-mss 1360
+exit
+
+#Ruta por defecto hacia el ISP
+ip route 0.0.0.0 0.0.0.0 20.24.23.1
+
+#NAT (sin exclusion: en esta infraestructura el router no tiene VPN)
+ip access-list extended NAT-LAN
+ permit ip 10.23.56.0 0.0.0.127 any
+exit
+ip nat inside source list NAT-LAN interface Ethernet0/0 overload
+
+line console 0
+ logging synchronous
+ exec-timeout 0 0
+exit
+
+end
+write memory
+
+# --- Verificacion ---
+# show ip interface brief
+# ping 20.24.23.1
+# ping 20.24.56.2
+# show ip nat translations
+# show ip dhcp binding
+
+
+
+=========================================================================
+FG-Server
+=========================================================================
+
+#Paso 0: acceso de gestion (unico paso por consola)
+
+config system interface
+    edit "port3"
+        set mode dhcp
+        set defaultgw disable
+        set allowaccess ping https ssh http
+    next
+end
+
+#Hostname (GUI: System > Settings)
+config system global
+    set hostname "FG-Server"
+end
+
+#Interfaces (GUI: Network > Interfaces)
+config system interface
+    edit "port1"
+        set alias "WAN"
+        set mode static
+        set ip 20.24.56.2 255.255.255.252
+        set allowaccess ping
+        set role wan
+    next
+    edit "port2"
+        set mode static
+        set ip 10.23.56.129 255.255.255.240
+        set allowaccess ping
+        set role lan
+    next
+end
+
+#Ruta por defecto hacia el ISP (GUI: Network > Static Routes)
+config router static
+    edit 1
+        set gateway 20.24.56.1
+        set device "port1"
+    next
+end
+
+# ============================================================
+# OBJETOS (GUI: Policy & Objects > Addresses)
+# ============================================================
+config firewall address
+    edit "Web-Server"
+        set subnet 10.23.56.130 255.255.255.255
+    next
+    edit "POOL-VPN"
+        set type iprange
+        set start-ip 10.23.56.200
+        set end-ip 10.23.56.210
+    next
+end
+
+# ============================================================
+# PUBLICACION DE LA WEB SIN VPN (GUI: Policy & Objects > Virtual IPs)
+# (Solo se publica TCP 443; el puerto 22 NO queda expuesto)
+# ============================================================
+config firewall vip
+    edit "VIP-WEB-HTTPS"
+        set extip 20.24.56.2
+        set mappedip "10.23.56.130"
+        set extintf "port1"
+        set portforward enable
+        set extport 443
+        set mappedport 443
+    next
+end
+
+# ============================================================
+# USUARIO Y GRUPO (GUI: User & Authentication)
+# ============================================================
+config user local
+    edit "angel"
+        set type password
+        set passwd <PASSWORD>
+    next
+end
+
+config user group
+    edit "VPN-USUARIOS"
+        set member "angel"
+    next
+end
+
+# ============================================================
+# SSL-VPN (intento inicial, DESCARTADO)
+# La licencia de evaluacion (LENC) solo ofrece cifrados que los
+# clientes actuales no soportan ("Cipher is (NONE)"). Se dejo
+# escuchando en port4 (sin cable ni IP) para desactivarla.
+# ============================================================
+config vpn ssl settings
+    set source-interface "port4"
+    set port 10443
+    set tunnel-ip-pools "SSLVPN_TUNNEL_ADDR1"
+    set ssl-min-proto-ver tls1-0
+end
+
+# ============================================================
+# VPN DE ACCESO REMOTO IPsec (GUI: VPN > IPsec Wizard > Remote Access
+# ============================================================
+config firewall address
+    edit "VPN-REMOTO_range"
+        set type iprange
+        set start-ip 10.23.56.200
+        set end-ip 10.23.56.210
+        set comment "VPN: VPN-REMOTO (Created by VPN wizard)"
+    next
+end
+
+#Phase 1
+#(DES/MD5 y grupo DH 5, limitado por la licencia de evaluacion)
+config vpn ipsec phase1-interface
+    edit "VPN-REMOTO"
+        set type dynamic
+        set interface "port1"
+        set ike-version 1
+        set mode aggressive
+        set peertype any
+        set net-device disable
+        set mode-cfg enable
+        set proposal des-md5
+        set dhgrp 5
+        set keylife 86400
+        set xauthtype auto
+        set authusrgrp "VPN-USUARIOS"
+        set ipv4-start-ip 10.23.56.200
+        set ipv4-end-ip 10.23.56.210
+        set ipv4-netmask 255.255.255.255
+        set ipv4-split-include "Web-Server"
+        set psksecret <PRE-SHARED-KEY>
+        set comments "VPN: VPN-REMOTO (Created by VPN wizard)"
+    next
+end
+
+#Phase 2
+#(Selectores 0.0.0.0/0: normal en acceso remoto; la politica limita el acceso)
+config vpn ipsec phase2-interface
+    edit "VPN-REMOTO"
+        set phase1name "VPN-REMOTO"
+        set proposal des-md5
+        set pfs enable
+        set dhgrp 5
+        set keylifeseconds 43200
+    next
+end
+
+# ============================================================
+# POLITICAS (GUI: Policy & Objects > Firewall Policy)
+# ============================================================
+config firewall policy
+    edit 1
+        set name "LAN-a-Internet"
+        set srcintf "port2"
+        set dstintf "port1"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat enable
+    next
+    edit 2
+        set name "Internet-a-Web-HTTPS"
+        set srcintf "port1"
+        set dstintf "port2"
+        set srcaddr "all"
+        set dstaddr "VIP-WEB-HTTPS"
+        set action accept
+        set schedule "always"
+        set service "HTTPS"
+    next
+    edit 3
+        set name "VPN-a-Servidor-SSH"
+        set srcintf "VPN-REMOTO"
+        set dstintf "port2"
+        set srcaddr "VPN-REMOTO_range"
+        set dstaddr "Web-Server"
+        set action accept
+        set schedule "always"
+        set service "SSH" "PING" "TRACEROUTE"
+    next
+end
+
+# --- Verificacion ---
+# execute ping 20.24.56.1
+# execute ping 20.24.23.2
+# show full-configuration vpn ipsec phase1-interface VPN-REMOTO
+# show full-configuration vpn ipsec phase2-interface VPN-REMOTO
+# Dashboard > Network > IPsec   (el tunel solo aparece con un cliente conectado)
+# diagnose debug flow filter port 443   (usado para diagnosticar la VIP)
+
+
+
+
+=========================================================================
+Web-Server
+=========================================================================
+
+#Red: /etc/netplan/01-lab.yaml
+network:
+  version: 2
+  ethernets:
+    eth0:
+      addresses: [10.23.56.130/28]
+      routes:
+        - to: 0.0.0.0/0
+          via: 10.23.56.129
+
+#cloud-init: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+network: {config: disabled}
+
+#Paquetes instalados
+apt install -y apache2 openssl curl traceroute openssh-server
+
+#Certificado autofirmado (IP privada y publica)
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/lab.key \
+  -out /etc/ssl/certs/lab.crt \
+  -subj "/C=DO/ST=Santo Domingo/O=ITLA/OU=Lab VPN/CN=10.23.56.130" \
+  -addext "subjectAltName=IP:10.23.56.130,IP:20.24.56.2"
+
+#Apache HTTPS: /etc/apache2/sites-available/default-ssl.conf
+SSLCertificateFile      /etc/ssl/certs/lab.crt
+SSLCertificateKeyFile   /etc/ssl/private/lab.key
+
+a2enmod ssl
+a2ensite default-ssl
+systemctl restart apache2
+systemctl enable apache2
+
+#Pagina: /var/www/html/index.html
+# (Titulo: "Infraestructura 3 - Web publica y SSH por VPN de acceso remoto")
+
+#SSH
+systemctl enable ssh
+systemctl restart ssh
+
+#Usuario para las pruebas de SSH
+adduser angel
+
+#Recomendado: impedir el login de root por SSH
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+systemctl restart ssh
+
+#Guardar en disco y apagar correctamente antes de mover cables
+sync
+shutdown -h now
+
+# --- Verificacion ---
+# ip a                                           (eth0 con 10.23.56.130/28)
+# ping -c 4 10.23.56.129                         (gateway FG-Server)
+# curl -k https://10.23.56.130                   (devuelve la pagina)
+# systemctl is-active ssh                        (active)
+# tail -n 5 /var/log/apache2/access.log          (web desde 20.24.23.2)
+# grep "Accepted password" /var/log/auth.log     (SSH desde 10.23.56.200)
+
+
+
+=========================================================================
+PC-Usuario
+=========================================================================
+
+dhclient eth1
+ip a
+ip route
+
+#Instalacion de paquetes (temporalmente por la red de Docker)
+ip route replace default via 10.177.0.1 dev eth0
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+apt -o Acquire::ForceIPv4=true update
+apt -o Acquire::ForceIPv4=true install -y strongswan libcharon-extra-plugins libstrongswan-extra-plugins traceroute openssh-client curl
+ip route replace default via 10.23.56.1 dev eth1    # devolver ruta al R-USER
+
+#Cliente VPN: /etc/ipsec.conf
+config setup
+    charondebug="ike 1, knl 1, cfg 1"
+
+conn fortigate
+    keyexchange=ikev1
+    aggressive=yes
+    ike=des-md5-modp1536!
+    esp=des-md5-modp1536!
+    left=%defaultroute
+    leftid=@angel
+    leftauth=psk
+    leftauth2=xauth
+    xauth_identity=angel
+    leftsourceip=%config
+    right=20.24.56.2
+    rightid=%any
+    rightauth=psk
+    rightsubnet=10.23.56.130/32
+    auto=add
+
+#Credenciales: /etc/ipsec.secrets  (chmod 600)
+: PSK "<PRE-SHARED-KEY>"
+angel : XAUTH "<PASSWORD>"
+
+#Pruebas SIN VPN
+curl -k https://20.24.56.2                      # Muestra la pagina (web publica)
+ssh -o ConnectTimeout=5 angel@20.24.56.2        # Connection timed out
+ssh -o ConnectTimeout=5 angel@10.23.56.130      # No route to host
+
+#Conectar la VPN
+ipsec start
+ipsec up fortigate
+# XAuth authentication of 'angel' (myself) successful
+# installing new virtual IP 10.23.56.200
+# connection 'fortigate' established successfully
+
+#Pruebas CON VPN
+ping -c 4 10.23.56.130                          # TTL=63
+traceroute -n 10.23.56.130
+#  1  * * *        (FG-Server: su respuesta ICMP queda fuera del selector)
+#  2  10.23.56.130
+ssh angel@10.23.56.130                          # Entra al servidor
+
+#Desconectar la VPN
+ipsec down fortigate
+ipsec status                                    # 0 up, 0 connecting
+curl -k https://20.24.56.2                      # La web sigue funcionando
+ssh -o ConnectTimeout=5 angel@10.23.56.130      # Vuelve a fallar
